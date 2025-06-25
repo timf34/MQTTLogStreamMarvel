@@ -524,9 +524,6 @@
           const dateStr = msg.timestamp.toLocaleDateString();
           
           let parsedHtml = '';
-          if (msg.parsed && typeof msg.parsed === 'object') {
-            parsedHtml = `<div class="message-parsed">Parsed: ${JSON.stringify(msg.parsed, null, 2)}</div>`;
-          }
 
           return `
             <div class="message-item">
