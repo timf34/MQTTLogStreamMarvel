@@ -1,0 +1,562 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AFL Ball Data Logger</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #f5f5f5;
+      color: #333;
+      line-height: 1.6;
+    }
+
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 20px;
+    }
+
+    .header {
+      background: white;
+      padding: 20px;
+      border-radius: 8px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+      margin-bottom: 20px;
+    }
+
+    .header h1 {
+      color: #008037;
+      margin-bottom: 10px;
+    }
+
+    .header p {
+      color: #666;
+      margin-bottom: 20px;
+    }
+
+    .connection-panel {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+      gap: 15px;
+      margin-bottom: 20px;
+    }
+
+    .input-group {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .input-group label {
+      font-weight: 500;
+      margin-bottom: 5px;
+      color: #555;
+    }
+
+    .input-group input {
+      padding: 10px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      font-size: 14px;
+    }
+
+    .input-group input:focus {
+      outline: none;
+      border-color: #008037;
+    }
+
+    .connect-button {
+      background: #008037;
+      color: white;
+      border: none;
+      padding: 12px 24px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 16px;
+      font-weight: 500;
+      transition: background-color 0.2s;
+    }
+
+    .connect-button:hover:not(:disabled) {
+      background: #006028;
+    }
+
+    .connect-button:disabled {
+      background: #cccccc;
+      cursor: not-allowed;
+    }
+
+    .connect-button.disconnect {
+      background: #dc3545;
+    }
+
+    .connect-button.disconnect:hover {
+      background: #c82333;
+    }
+
+    .status-bar {
+      background: white;
+      padding: 15px;
+      border-radius: 8px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+      margin-bottom: 20px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    .status-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .status-indicator {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: #dc3545;
+    }
+
+    .status-indicator.connected {
+      background: #28a745;
+    }
+
+    .messages-panel {
+      background: white;
+      border-radius: 8px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+      overflow: hidden;
+    }
+
+    .messages-header {
+      background: #f8f9fa;
+      padding: 15px;
+      border-bottom: 1px solid #dee2e6;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .messages-header h3 {
+      margin: 0;
+      color: #495057;
+    }
+
+    .clear-button {
+      background: #6c757d;
+      color: white;
+      border: none;
+      padding: 8px 16px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 14px;
+    }
+
+    .clear-button:hover {
+      background: #5a6268;
+    }
+
+    .messages-container {
+      height: 500px;
+      overflow-y: auto;
+    }
+
+    .message-item {
+      padding: 12px 15px;
+      border-bottom: 1px solid #eee;
+      font-family: 'Monaco', 'Menlo', 'Courier New', monospace;
+      font-size: 13px;
+    }
+
+    .message-item:nth-child(even) {
+      background: #f8f9fa;
+    }
+
+    .message-timestamp {
+      color: #6c757d;
+      font-weight: bold;
+      margin-right: 10px;
+    }
+
+    .message-content {
+      color: #495057;
+      word-break: break-all;
+    }
+
+    .message-parsed {
+      margin-top: 5px;
+      padding: 8px;
+      background: #e9ecef;
+      border-radius: 4px;
+      color: #495057;
+    }
+
+    .no-messages {
+      padding: 40px;
+      text-align: center;
+      color: #6c757d;
+    }
+
+    @media (max-width: 768px) {
+      .connection-panel {
+        grid-template-columns: 1fr;
+      }
+      
+      .status-bar {
+        flex-direction: column;
+        align-items: stretch;
+      }
+      
+      .messages-container {
+        height: 400px;
+      }
+    }
+  </style>
+  
+  <!-- Library dependencies -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/mqtt/4.3.7/mqtt.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js"></script>
+  <script src="https://sdk.amazonaws.com/js/aws-sdk-2.1036.0.min.js"></script>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>AFL Ball Data Logger</h1>
+      <p>Real-time MQTT message monitoring for AFL ball position data. Connect to view the last 500 messages from your MQTT topic.</p>
+      
+      <div class="connection-panel">
+        <div class="input-group">
+          <label for="region">AWS Region</label>
+          <input type="text" id="region" value="ap-southeast-2" placeholder="e.g., ap-southeast-2">
+        </div>
+        
+        <div class="input-group">
+          <label for="endpoint">AWS IoT Endpoint</label>
+          <input type="text" id="endpoint" value="a3lkzcadhi1yzr-ats.iot.ap-southeast-2.amazonaws.com" placeholder="your-endpoint.iot.region.amazonaws.com">
+        </div>
+        
+        <div class="input-group">
+          <label for="accessKey">AWS Access Key ID</label>
+          <input type="text" id="accessKey" placeholder="Enter your AWS Access Key ID">
+        </div>
+        
+        <div class="input-group">
+          <label for="secretKey">AWS Secret Access Key</label>
+          <input type="password" id="secretKey" placeholder="Enter your AWS Secret Access Key">
+        </div>
+        
+        <div class="input-group">
+          <label for="topic">MQTT Topic</label>
+          <input type="text" id="topic" value="marvel_AUS/ai_pub" placeholder="your/mqtt/topic">
+        </div>
+        
+        <div class="input-group">
+          <label>&nbsp;</label>
+          <button id="connectBtn" class="connect-button">Connect to MQTT</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="status-bar">
+      <div class="status-item">
+        <div id="statusIndicator" class="status-indicator"></div>
+        <span id="statusText">Disconnected</span>
+      </div>
+      <div class="status-item">
+        <strong>Messages:</strong>
+        <span id="messageCount">0</span>
+      </div>
+      <div class="status-item">
+        <strong>Topic:</strong>
+        <span id="currentTopic">-</span>
+      </div>
+      <div class="status-item">
+        <strong>Last Message:</strong>
+        <span id="lastMessageTime">-</span>
+      </div>
+    </div>
+
+    <div class="messages-panel">
+      <div class="messages-header">
+        <h3>Live Message Log</h3>
+        <button id="clearBtn" class="clear-button">Clear Log</button>
+      </div>
+      <div id="messagesContainer" class="messages-container">
+        <div class="no-messages">
+          No messages received yet. Connect to MQTT to start monitoring.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    class MQTTLogger {
+      constructor() {
+        this.client = null;
+        this.connected = false;
+        this.messages = [];
+        this.maxMessages = 500;
+        
+        this.initializeUI();
+        this.bindEvents();
+      }
+
+      initializeUI() {
+        this.elements = {
+          connectBtn: document.getElementById('connectBtn'),
+          clearBtn: document.getElementById('clearBtn'),
+          statusIndicator: document.getElementById('statusIndicator'),
+          statusText: document.getElementById('statusText'),
+          messageCount: document.getElementById('messageCount'),
+          currentTopic: document.getElementById('currentTopic'),
+          lastMessageTime: document.getElementById('lastMessageTime'),
+          messagesContainer: document.getElementById('messagesContainer'),
+          region: document.getElementById('region'),
+          endpoint: document.getElementById('endpoint'),
+          accessKey: document.getElementById('accessKey'),
+          secretKey: document.getElementById('secretKey'),
+          topic: document.getElementById('topic')
+        };
+      }
+
+      bindEvents() {
+        this.elements.connectBtn.addEventListener('click', () => {
+          if (this.connected) {
+            this.disconnect();
+          } else {
+            this.connect();
+          }
+        });
+
+        this.elements.clearBtn.addEventListener('click', () => {
+          this.clearMessages();
+        });
+      }
+
+      updateStatus(status, isConnected = false) {
+        this.connected = isConnected;
+        this.elements.statusText.textContent = status;
+        this.elements.statusIndicator.classList.toggle('connected', isConnected);
+        
+        if (isConnected) {
+          this.elements.connectBtn.textContent = 'Disconnect';
+          this.elements.connectBtn.classList.add('disconnect');
+          this.elements.currentTopic.textContent = this.elements.topic.value;
+        } else {
+          this.elements.connectBtn.textContent = 'Connect to MQTT';
+          this.elements.connectBtn.classList.remove('disconnect');
+          this.elements.currentTopic.textContent = '-';
+        }
+        
+        this.elements.connectBtn.disabled = false;
+      }
+
+      createSignedUrl() {
+        const region = this.elements.region.value;
+        const endpoint = this.elements.endpoint.value;
+        const accessKey = this.elements.accessKey.value;
+        const secretKey = this.elements.secretKey.value;
+
+        // Time handling
+        const datetime = new Date().toISOString().replace(/[:\-]|\.\d{3}/g, '');
+        const date = datetime.substring(0, 8);
+        
+        // Policy for AWS IoT
+        const credentialScope = date + '/' + region + '/iotdevicegateway/aws4_request';
+        
+        // Build canonical request
+        let canonicalQuerystring = 'X-Amz-Algorithm=AWS4-HMAC-SHA256';
+        canonicalQuerystring += '&X-Amz-Credential=' + encodeURIComponent(accessKey + '/' + credentialScope);
+        canonicalQuerystring += '&X-Amz-Date=' + datetime;
+        canonicalQuerystring += '&X-Amz-SignedHeaders=host';
+        
+        const canonicalHeaders = 'host:' + endpoint + '\n';
+        const payloadHash = CryptoJS.SHA256('').toString(CryptoJS.enc.Hex);
+        
+        const canonicalRequest = 'GET\n/mqtt\n' + canonicalQuerystring + '\n' + canonicalHeaders + '\nhost\n' + payloadHash;
+        
+        // Create signature
+        const stringToSign = 'AWS4-HMAC-SHA256\n' + datetime + '\n' + credentialScope + '\n' + CryptoJS.SHA256(canonicalRequest).toString(CryptoJS.enc.Hex);
+        
+        // Calculate signature
+        let signingKey = CryptoJS.HmacSHA256(date, 'AWS4' + secretKey);
+        signingKey = CryptoJS.HmacSHA256(region, signingKey);
+        signingKey = CryptoJS.HmacSHA256('iotdevicegateway', signingKey);
+        signingKey = CryptoJS.HmacSHA256('aws4_request', signingKey);
+        
+        const signature = CryptoJS.HmacSHA256(stringToSign, signingKey).toString(CryptoJS.enc.Hex);
+        
+        // Add signature to query string
+        canonicalQuerystring += '&X-Amz-Signature=' + signature;
+        
+        // Create WebSocket URL
+        return 'wss://' + endpoint + '/mqtt?' + canonicalQuerystring;
+      }
+
+      connect() {
+        // Validate inputs
+        const requiredFields = ['region', 'endpoint', 'accessKey', 'secretKey', 'topic'];
+        for (const field of requiredFields) {
+          if (!this.elements[field].value.trim()) {
+            alert(`Please fill in the ${field.replace(/([A-Z])/g, ' $1').toLowerCase()} field`);
+            return;
+          }
+        }
+
+        this.elements.connectBtn.disabled = true;
+        this.elements.connectBtn.textContent = 'Connecting...';
+        this.updateStatus('Connecting...');
+
+        try {
+          const sigV4Url = this.createSignedUrl();
+          const clientId = "afl-logger-" + Math.random().toString(16).substr(2, 8);
+          
+          this.client = mqtt.connect(sigV4Url, {
+            clientId: clientId,
+            reconnectPeriod: 3000,
+            keepalive: 30
+          });
+
+          this.client.on('connect', () => {
+            this.updateStatus('Connected', true);
+            
+            // Subscribe to topic
+            this.client.subscribe(this.elements.topic.value, (err) => {
+              if (err) {
+                this.updateStatus('Subscription error: ' + err.message);
+              } else {
+                this.updateStatus('Subscribed and listening', true);
+                this.addLogMessage('System', `Subscribed to topic: ${this.elements.topic.value}`);
+              }
+            });
+          });
+
+          this.client.on('message', (topic, message) => {
+            this.handleMessage(topic, message);
+          });
+
+          this.client.on('error', (err) => {
+            this.updateStatus('Error: ' + err.message);
+            console.error('MQTT error:', err);
+          });
+
+          this.client.on('close', () => {
+            this.updateStatus('Connection closed');
+          });
+
+        } catch (error) {
+          this.updateStatus('Connection failed: ' + error.message);
+          console.error('Connection error:', error);
+        }
+      }
+
+      disconnect() {
+        if (this.client) {
+          this.client.end();
+          this.client = null;
+        }
+        this.updateStatus('Disconnected');
+        this.addLogMessage('System', 'Disconnected from MQTT broker');
+      }
+
+      handleMessage(topic, message) {
+        const timestamp = new Date();
+        const messageStr = message.toString();
+        
+        // Try to parse as JSON for better display
+        let parsedData = null;
+        try {
+          parsedData = JSON.parse(messageStr);
+        } catch (e) {
+          // Not JSON, that's fine
+        }
+
+        const messageObj = {
+          timestamp,
+          topic,
+          raw: messageStr,
+          parsed: parsedData
+        };
+
+        this.messages.unshift(messageObj);
+        
+        // Keep only last 500 messages
+        if (this.messages.length > this.maxMessages) {
+          this.messages = this.messages.slice(0, this.maxMessages);
+        }
+
+        this.updateMessageDisplay();
+        this.elements.lastMessageTime.textContent = timestamp.toLocaleTimeString();
+      }
+
+      addLogMessage(type, content) {
+        const messageObj = {
+          timestamp: new Date(),
+          topic: type,
+          raw: content,
+          parsed: null
+        };
+        
+        this.messages.unshift(messageObj);
+        this.updateMessageDisplay();
+      }
+
+      updateMessageDisplay() {
+        this.elements.messageCount.textContent = this.messages.length;
+        
+        if (this.messages.length === 0) {
+          this.elements.messagesContainer.innerHTML = '<div class="no-messages">No messages received yet. Connect to MQTT to start monitoring.</div>';
+          return;
+        }
+
+        const messagesHtml = this.messages.map(msg => {
+          const timeStr = msg.timestamp.toLocaleTimeString();
+          const dateStr = msg.timestamp.toLocaleDateString();
+          
+          let parsedHtml = '';
+          if (msg.parsed && typeof msg.parsed === 'object') {
+            parsedHtml = `<div class="message-parsed">Parsed: ${JSON.stringify(msg.parsed, null, 2)}</div>`;
+          }
+
+          return `
+            <div class="message-item">
+              <span class="message-timestamp">${dateStr} ${timeStr}</span>
+              <span class="message-content">${this.escapeHtml(msg.raw)}</span>
+              ${parsedHtml}
+            </div>
+          `;
+        }).join('');
+
+        this.elements.messagesContainer.innerHTML = messagesHtml;
+      }
+
+      clearMessages() {
+        this.messages = [];
+        this.updateMessageDisplay();
+        this.elements.lastMessageTime.textContent = '-';
+      }
+
+      escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+      }
+    }
+
+    // Initialize the logger when the page loads
+    document.addEventListener('DOMContentLoaded', () => {
+      new MQTTLogger();
+    });
+  </script>
+</body>
+</html>
