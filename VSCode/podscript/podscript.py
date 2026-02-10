@@ -223,18 +223,32 @@ def resolve_apple_podcasts_url(url: str) -> tuple[str, str | None]:
     return feed_url, episode_id
 
 
-def lookup_apple_episode_title(episode_id: str) -> str | None:
-    """Use the iTunes Lookup API to get the episode title from an Apple episode ID."""
-    resp = requests.get(
-        f"https://itunes.apple.com/lookup?id={episode_id}",
-        timeout=15,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    results = data.get("results", [])
-    if results:
-        return results[0].get("trackName")
-    return None
+def scrape_apple_episode_info(apple_url: str) -> dict | None:
+    """
+    Scrape episode title and audio URL from an Apple Podcasts page.
+    Returns dict with 'title' and optionally 'audio_url', or None on failure.
+    """
+    try:
+        resp = requests.get(apple_url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+        resp.raise_for_status()
+        page = resp.text
+    except Exception:
+        return None
+
+    info = {}
+    # Extract title from og:title meta tag (e.g. "The Economics of Carbon Removal ...")
+    m = re.search(r'<meta\s[^>]*property="og:title"\s[^>]*content="([^"]*)"', page)
+    if not m:
+        m = re.search(r'<meta\s[^>]*content="([^"]*)"\s[^>]*property="og:title"', page)
+    if m:
+        info["title"] = html.unescape(m.group(1))
+
+    # Extract audio URL from streamUrl in embedded JSON
+    m = re.search(r'"streamUrl"\s*:\s*"(https?://[^"]+\.mp3[^"]*)"', page)
+    if m:
+        info["audio_url"] = m.group(1)
+
+    return info if info else None
 
 
 # ── RSS ──────────────────────────────────────────────────────────────────────
@@ -475,6 +489,7 @@ def main():
 
     # ── Resolve Apple Podcasts URLs to RSS ──────────────────────────────
     apple_episode_id = None
+    original_url = url
     if parse_apple_podcasts_url(url):
         url, apple_episode_id = resolve_apple_podcasts_url(url)
 
@@ -525,16 +540,28 @@ def main():
     # Select episode
     if apple_episode_id:
         # Try to match the specific episode from the Apple Podcasts link
-        ep_title = lookup_apple_episode_title(apple_episode_id)
+        apple_info = scrape_apple_episode_info(original_url)
         selected = None
-        if ep_title:
+        if apple_info and apple_info.get("title"):
+            ep_title = apple_info["title"]
             print(f"\nLooking for episode: {ep_title}")
             for ep in episodes:
                 if ep.title.strip().lower() == ep_title.strip().lower():
                     selected = ep
                     break
+        if selected is None and apple_info and apple_info.get("audio_url"):
+            # Episode not in RSS feed (too old), but we have the audio URL from Apple
+            title = apple_info.get("title", "Unknown Episode")
+            print(f"\nEpisode not in RSS feed, using audio URL from Apple Podcasts page.")
+            selected = Episode(
+                title=title,
+                audio_url=apple_info["audio_url"],
+                publish_date="",
+                description="",
+                duration="",
+            )
         if selected is None:
-            print(f"\nCould not find the specific episode in the feed. Using most recent episode.")
+            print(f"\nCould not find the specific episode. Using most recent episode.")
             selected = episodes[0]
     elif args.episode is not None:
         if args.episode < 1 or args.episode > len(episodes):
