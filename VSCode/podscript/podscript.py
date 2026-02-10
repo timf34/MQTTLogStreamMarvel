@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -68,6 +69,24 @@ def clean_html(text: str) -> str:
     """Strip HTML tags and unescape entities."""
     text = re.sub(r"<[^>]*>", "", text)
     return html.unescape(text).strip()
+
+
+def normalize_for_matching(text: str) -> str:
+    """Normalize a string for fuzzy title comparison.
+
+    Lowercases, normalizes unicode (smart quotes/dashes → ascii equivalents),
+    strips punctuation, and collapses whitespace.
+    """
+    text = unicodedata.normalize("NFKD", text).lower()
+    # Replace common unicode punctuation with ascii
+    text = text.replace("\u2019", "'").replace("\u2018", "'")
+    text = text.replace("\u201c", '"').replace("\u201d", '"')
+    text = text.replace("\u2013", "-").replace("\u2014", "-")
+    # Strip all punctuation
+    text = re.sub(r"[^\w\s]", "", text)
+    # Collapse whitespace
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
 
 
 def format_duration(duration) -> str:
@@ -236,15 +255,36 @@ def scrape_apple_episode_info(apple_url: str) -> dict | None:
         return None
 
     info = {}
-    # Extract title from og:title meta tag (e.g. "The Economics of Carbon Removal ...")
+
+    # Extract title — try og:title first
     m = re.search(r'<meta\s[^>]*property="og:title"\s[^>]*content="([^"]*)"', page)
     if not m:
         m = re.search(r'<meta\s[^>]*content="([^"]*)"\s[^>]*property="og:title"', page)
     if m:
         info["title"] = html.unescape(m.group(1))
+    else:
+        # Fallback: extract from <title> tag (often "Episode Title - Podcast Name")
+        m = re.search(r"<title>([^<]+)</title>", page)
+        if m:
+            raw_title = html.unescape(m.group(1)).strip()
+            # Apple title format is often "Episode Title - Podcast Name on Apple Podcasts"
+            raw_title = re.sub(r"\s+on\s+Apple\s+Podcasts\s*$", "", raw_title)
+            # Take the part before the last " - " as the episode title
+            if " - " in raw_title:
+                info["title"] = raw_title.rsplit(" - ", 1)[0].strip()
+            else:
+                info["title"] = raw_title
+
+    # Fallback: extract a fuzzy title from the URL slug
+    slug_m = re.search(r"/podcast/([^/]+)/id", apple_url)
+    if slug_m and "title" not in info:
+        info["title"] = slug_m.group(1).replace("-", " ")
 
     # Extract audio URL from streamUrl in embedded JSON
     m = re.search(r'"streamUrl"\s*:\s*"(https?://[^"]+\.mp3[^"]*)"', page)
+    if not m:
+        # Fallback: streamUrl without .mp3 extension (some episodes use different formats)
+        m = re.search(r'"streamUrl"\s*:\s*"(https?://[^"]+)"', page)
     if m:
         info["audio_url"] = m.group(1)
 
@@ -427,12 +467,17 @@ def generate_markdown(
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 
+CONFIG_DIR = Path.home() / ".config" / "podscript"
+CONFIG_FILE = CONFIG_DIR / ".env"
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="podscript",
         description="Transcribe podcasts and YouTube videos using ElevenLabs Scribe API.",
     )
-    parser.add_argument("url", help="RSS feed URL or YouTube video URL")
+    parser.add_argument("url", nargs="?", help="RSS feed URL, YouTube URL, or Apple Podcasts URL")
+    parser.add_argument("--setup", action="store_true", help="Save your ElevenLabs API key")
     parser.add_argument("--episode", type=int, metavar="N", help="Transcribe episode N (1 = most recent)")
     parser.add_argument("--search", metavar="QUERY", help="Search episodes by title/description")
     parser.add_argument("--latest", action="store_true", help="Transcribe the most recent episode (default)")
@@ -441,19 +486,46 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def setup_api_key():
+    """Prompt the user for their ElevenLabs API key and save it."""
+    print("Enter your ElevenLabs API key (from https://elevenlabs.io/app/settings/api-keys):")
+    try:
+        key = input("> ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print("\nSetup cancelled.")
+        sys.exit(1)
+    if not key:
+        print("No key entered. Setup cancelled.", file=sys.stderr)
+        sys.exit(1)
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    CONFIG_FILE.write_text(f"ELEVENLABS_API_KEY={key}\n", encoding="utf-8")
+    print(f"\nAPI key saved to {CONFIG_FILE}")
+    print("You're all set! Try: podscript <url>")
+
+
 def require_api_key():
     """Exit if ELEVENLABS_API_KEY is not set."""
     if not os.environ.get("ELEVENLABS_API_KEY", ""):
-        print("Error: ELEVENLABS_API_KEY not found in environment.", file=sys.stderr)
-        print("Make sure you have a .env file with your API key.", file=sys.stderr)
+        print("Error: ELEVENLABS_API_KEY not set.", file=sys.stderr)
+        print("Run `podscript --setup` to save your API key.", file=sys.stderr)
         sys.exit(1)
 
 
 def main():
+    # Load API key from config file, then local .env, then environment
+    load_dotenv(CONFIG_FILE)
     load_dotenv()
 
     parser = build_parser()
     args = parser.parse_args()
+
+    if args.setup:
+        setup_api_key()
+        return
+
+    if not args.url:
+        parser.print_help()
+        sys.exit(1)
 
     url: str = args.url
 
@@ -491,6 +563,7 @@ def main():
     apple_episode_id = None
     original_url = url
     if parse_apple_podcasts_url(url):
+        print("\nDetected Apple Podcasts URL\n")
         url, apple_episode_id = resolve_apple_podcasts_url(url)
 
     # ── Podcast RSS path ─────────────────────────────────────────────────
@@ -516,20 +589,75 @@ def main():
             print("No episodes match your search.", file=sys.stderr)
             sys.exit(1)
 
-    # Display episode list
-    display_limit = len(episodes) if args.search else 30
-    for i, ep in enumerate(episodes[:display_limit]):
-        try:
-            dt = datetime.strptime(ep.publish_date[:16], "%a, %d %b %Y")
-            date_str = f"{dt.month}/{dt.day}/{dt.year}"
-        except (ValueError, IndexError):
-            date_str = ep.publish_date[:20] if ep.publish_date else "Unknown date"
-        dur = ep.duration or "Unknown duration"
-        print(f"  {i + 1:3}. {ep.title}")
-        print(f"       {date_str} | {dur}")
+    # ── Apple episode: resolve before listing ────────────────────────────
+    # When the user shared a specific episode link, try to match it now
+    # so we can skip the episode listing entirely.
+    apple_selected = None
+    from_scraped_url = False
+    if apple_episode_id:
+        apple_info = scrape_apple_episode_info(original_url)
+        if apple_info and apple_info.get("title"):
+            ep_title = apple_info["title"]
+            print(f"Looking for episode: {ep_title}")
 
-    if len(episodes) > display_limit:
-        print(f"\n  ... and {len(episodes) - display_limit} more episodes (use --search to filter)")
+            # Exact match (case-insensitive, stripped)
+            for ep in episodes:
+                if ep.title.strip().lower() == ep_title.strip().lower():
+                    apple_selected = ep
+                    break
+
+            # Fuzzy match: normalize and try substring containment
+            if apple_selected is None:
+                norm_apple = normalize_for_matching(ep_title)
+                for ep in episodes:
+                    norm_ep = normalize_for_matching(ep.title)
+                    if norm_apple == norm_ep or norm_apple in norm_ep or norm_ep in norm_apple:
+                        print(f'\nFuzzy match found: "{ep.title}"')
+                        try:
+                            confirm = input("Is this the correct episode? (y/n): ").strip().lower()
+                        except (EOFError, KeyboardInterrupt):
+                            confirm = "n"
+                        if confirm == "y":
+                            apple_selected = ep
+                        break
+
+        if apple_selected is None and apple_info and apple_info.get("audio_url"):
+            # Episode not in RSS feed (too old), but we have the audio URL from Apple
+            title = apple_info.get("title", "Unknown Episode")
+            print(f"\nEpisode not in RSS feed, using scraped audio URL from Apple Podcasts page.")
+            print(f"Title: {title}")
+            apple_selected = Episode(
+                title=title,
+                audio_url=apple_info["audio_url"],
+                publish_date="",
+                description="",
+                duration="",
+            )
+            from_scraped_url = True
+
+        if apple_selected is None:
+            # Don't silently fall back to the wrong episode
+            print(f"\nError: Could not find the specific episode from this Apple Podcasts link.", file=sys.stderr)
+            print(f"Suggestions:", file=sys.stderr)
+            print(f'  - Try: podscript "{url}" --search "keyword from episode title"', file=sys.stderr)
+            print(f'  - Try: podscript "{url}" --list   (to browse episodes)', file=sys.stderr)
+            sys.exit(1)
+
+    # ── Display episode list (skip when a specific Apple episode is already selected) ──
+    if apple_selected is None:
+        display_limit = len(episodes) if args.search else 30
+        for i, ep in enumerate(episodes[:display_limit]):
+            try:
+                dt = datetime.strptime(ep.publish_date[:16], "%a, %d %b %Y")
+                date_str = f"{dt.month}/{dt.day}/{dt.year}"
+            except (ValueError, IndexError):
+                date_str = ep.publish_date[:20] if ep.publish_date else "Unknown date"
+            dur = ep.duration or "Unknown duration"
+            print(f"  {i + 1:3}. {ep.title}")
+            print(f"       {date_str} | {dur}")
+
+        if len(episodes) > display_limit:
+            print(f"\n  ... and {len(episodes) - display_limit} more episodes (use --search to filter)")
 
     # If --list or (--search without --episode), stop here
     if args.list_episodes or (args.search and args.episode is None and not apple_episode_id):
@@ -538,31 +666,8 @@ def main():
     require_api_key()
 
     # Select episode
-    if apple_episode_id:
-        # Try to match the specific episode from the Apple Podcasts link
-        apple_info = scrape_apple_episode_info(original_url)
-        selected = None
-        if apple_info and apple_info.get("title"):
-            ep_title = apple_info["title"]
-            print(f"\nLooking for episode: {ep_title}")
-            for ep in episodes:
-                if ep.title.strip().lower() == ep_title.strip().lower():
-                    selected = ep
-                    break
-        if selected is None and apple_info and apple_info.get("audio_url"):
-            # Episode not in RSS feed (too old), but we have the audio URL from Apple
-            title = apple_info.get("title", "Unknown Episode")
-            print(f"\nEpisode not in RSS feed, using audio URL from Apple Podcasts page.")
-            selected = Episode(
-                title=title,
-                audio_url=apple_info["audio_url"],
-                publish_date="",
-                description="",
-                duration="",
-            )
-        if selected is None:
-            print(f"\nCould not find the specific episode. Using most recent episode.")
-            selected = episodes[0]
+    if apple_selected is not None:
+        selected = apple_selected
     elif args.episode is not None:
         if args.episode < 1 or args.episode > len(episodes):
             print(f"\nInvalid episode number. Choose between 1 and {len(episodes)}.", file=sys.stderr)
@@ -578,9 +683,35 @@ def main():
     print("Starting transcription...")
     print("This may take several minutes depending on episode length.\n")
 
-    t0 = time.time()
-    segments, duration = transcribe(selected.audio_url)
-    elapsed = int(time.time() - t0)
+    # If the audio URL came from scraping Apple (not RSS), download to temp file
+    # to avoid URL expiry / auth issues with ElevenLabs cloud_storage_url.
+    if from_scraped_url:
+        print("Downloading audio from Apple Podcasts...")
+        temp_audio = os.path.join(tempfile.gettempdir(), f"podscript-apple-{os.getpid()}.mp3")
+        try:
+            dl_resp = requests.get(selected.audio_url, timeout=600, stream=True)
+            dl_resp.raise_for_status()
+            with open(temp_audio, "wb") as f:
+                for chunk in dl_resp.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            size_mb = os.path.getsize(temp_audio) / (1024 * 1024)
+            print(f"Downloaded: {size_mb:.1f} MB\n")
+        except Exception as e:
+            print(f"Error downloading audio: {e}", file=sys.stderr)
+            sys.exit(1)
+        try:
+            t0 = time.time()
+            segments, duration = transcribe(temp_audio, is_file=True)
+            elapsed = int(time.time() - t0)
+        finally:
+            try:
+                os.unlink(temp_audio)
+            except OSError:
+                pass
+    else:
+        t0 = time.time()
+        segments, duration = transcribe(selected.audio_url)
+        elapsed = int(time.time() - t0)
 
     print(f"\nTranscription complete in {elapsed} seconds.")
     print(f"Duration: {format_timestamp(duration)}")
